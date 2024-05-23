@@ -1,5 +1,4 @@
 from bs4 import BeautifulSoup
-from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -8,11 +7,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 import psycopg2
 import time
 
-# Configura el driver de Selenium (Firefox en este caso)
+# Configure Selenium driver (Firefox in this case)
 driver = webdriver.Firefox()
-driver.get("https://procesosjudiciales.funcionjudicial.gob.ec/busqueda-filtros")
+driver.get(
+    "https://procesosjudiciales.funcionjudicial.gob.ec/busqueda-filtros")
 
-# Conectar a la base de datos PostgreSQL
+# Connect to PostgreSQL database
 conn = psycopg2.connect(
     dbname="railway",
     user="postgres",
@@ -25,84 +25,105 @@ cursor = conn.cursor()
 input_element = driver.find_element(By.ID, "mat-input-1")
 input_element.send_keys("0968599020001" + Keys.ENTER)
 
+# Zoom is set to 80% to facilitate data mining
+driver.execute_script("document.body.style.zoom='80%'")
+
 time.sleep(1)
 
 html = driver.page_source
 soap = BeautifulSoup(html, "html.parser")
-results = soap.find_all("div", class_="causa-individual ng-star-inserted")
-data = []
-for result in results:
-    # Insertar información del proceso
-    id = result.select_one("div.id").text
-    date_of_entry = result.select_one("div.fecha").text
-    process_number = result.select_one("div.numero-proceso").text
-    action_infraction = result.select_one("div.accion-infraccion").text
-    cursor.execute("""
-        INSERT INTO public.process
-        (id, date_of_entry, process_number, action_infraction)
-        VALUES(%s, %s, %s, %s);
-    """, (id, date_of_entry, process_number, action_infraction))
-    conn.commit()
 
-    # Proceso para hacer click e ir a la página de los detalles del proceso
-    process_number = result.select_one("div.numero-proceso").text
-    WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable(
-                (By.XPATH, f"//*[@aria-label[contains(., '{process_number}')]]"))).click()
-    time.sleep(1)
-    WebDriverWait(driver, 10).until(
-        EC.presence_of_element_located(
-            (By.CLASS_NAME, "lista-movimiento")))
-    # Obtener el Html de la página de los detalles
-    html_2 = driver.page_source
-    soap_2 = BeautifulSoup(html_2, "html.parser")
-    details = soap_2.find("div", class_="lista-movimiento")
-    for detail in details:
-        if detail.text == "":
-            break
-        # Insertar información del detalle
-        incident_number = detail.select_one("div.numero-incidente").text
-        date = detail.select_one("div.fecha-ingreso").text
-        offended_actors = detail.select_one("div.lista-actores").text
-        defendants = detail.select_one("div.lista-demandados").text
+pages = soap.find_all(
+    "div", class_="mat-mdc-paginator-range-label")[0].text.split(' ')[4]
+
+next_page = "Página siguiente"
+
+for page in range(1, int(pages)):
+    if page != 1:
+        html_next_page = driver.page_source
+        soap_next_page = BeautifulSoup(html_next_page, "html.parser")
+        results = soap_next_page.find_all(
+            "div", class_="causa-individual ng-star-inserted")
+    else:
+        results = soap.find_all(
+            "div", class_="causa-individual ng-star-inserted")
+    for result in results:
+        # Insert process information
+        id = result.select_one("div.id").text
+        date_of_entry = result.select_one("div.fecha").text
+        process_number = result.select_one("div.numero-proceso").text
+        action_infraction = result.select_one("div.accion-infraccion").text
         cursor.execute("""
-            INSERT INTO public.detalles
-            (incident_number, date, offended_actors, defendants, process_number)
-            VALUES(%s, %s, %s, %s, %s);
-        """, (incident_number, date, offended_actors, defendants, process_number))
+            INSERT INTO public.process
+            (id, date_of_entry, process_number, action_infraction)
+            VALUES(%s, %s, %s, %s);
+        """, (id, date_of_entry, process_number, action_infraction))
         conn.commit()
-        date = detail.select_one("div.fecha-ingreso").text
-        date_parseada = datetime.strptime(date, " %d/%m/%Y %H:%M ")
-        date_iso = date_parseada.isoformat()[:-3] + "" * -3
-        text = f"Vínculo para ingresar al incidente del {date_iso}"
-        print(WebDriverWait(driver, 20).until(
+
+        # Process to click and go to the process details page.
+        WebDriverWait(driver, 15).until(EC.element_to_be_clickable(
+            (By.XPATH, f"//*[@aria-label[contains(., '{process_number}')]]"))
+        ).click()
+        time.sleep(1)
+        WebDriverWait(driver, 10).until(
             EC.presence_of_element_located(
-                (By.XPATH, f"//*[@aria-label[contains(., '{text}')]]"))))
-        judicial_proceedings_element = driver.find_element(
-            By.XPATH, f"//*[@aria-label[contains(., '{date_iso}')]]")
-        driver.execute_script(
-            "arguments[0].scrollIntoView();", judicial_proceedings_element)
-        WebDriverWait(driver, 20).until(
-            EC.element_to_be_clickable(
-                (By.XPATH, f"//*[@aria-label[contains(., '{text}')]]"))).click()
-        time.sleep(1)
-        # html_3 = driver.page_source
-        # soap_3 = BeautifulSoup(html_3, "html.parser")
-        # export_pdf = soap_3.find("span", "mdc-button__label")
-        # data_2 = export_pdf.text
-        va = " Exportar PDF "
-        pdf_element = driver.find_element(By.CLASS_NAME, "mdc-button__label")
-        pdf_content = pdf_element.text
-        with open("export.pdf", "wb") as f:
-            f.write(pdf_content.encode("utf-8"))
+                (By.CLASS_NAME, "lista-movimiento")))
+        # Get the Html of the detail page
+        html_2 = driver.page_source
+        soap_2 = BeautifulSoup(html_2, "html.parser")
+        details = soap_2.find("div", class_="lista-movimiento")
+        for detail in details:
+            if detail.text == "":
+                break
+            # Insert detail information
+            incident_number = detail.select_one("div.numero-incidente").text
+            date = detail.select_one("div.fecha-ingreso").text
+            offended_actors = detail.select_one("div.lista-actores").text
+            defendants = detail.select_one("div.lista-demandados").text
+            cursor.execute("""
+                INSERT INTO public.details
+                (incident_number, date, offended_actors, defendants,
+                process_number) VALUES(%s, %s, %s, %s, %s);
+            """, (incident_number,
+                  date,
+                  offended_actors, defendants, process_number))
+            conn.commit()
         driver.back()
-        print('helloooooooooooooooo')
+        """
+            In this part we did this procedure because when you go back
+            from the details page to the processes page, you immediately go
+            back to the first search page, so you had to increment (by clicking
+            the button) to find the correct page and enter the details.
+        """
+        if page != 1:
+            new_page_performances = page - 1
+            for new_page_performances in range(0, new_page_performances):
+                WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+                    (By.XPATH, f"//*[@aria-label[contains(., '{next_page}')]]")
+                )).click()
+                time.sleep(1)
+        else:
+            time.sleep(1)
+    """
+        In this part we did this procedure because when you go
+        back from the details page to the processes page, you immediately
+        go back to the first search page, so you had to increment (by
+        clicking the button) to find the correct page and enter the details.
+    """
+    if page != 1:
+        for new in range(0, 1):
+            WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+                (By.XPATH, f"//*[@aria-label[contains(., '{next_page}')]]")
+            )).click()
+            time.sleep(1)
+    else:
+        for page in range(0, page):
+            WebDriverWait(driver, 10).until(EC.element_to_be_clickable(
+                (By.XPATH, f"//*[@aria-label[contains(., '{next_page}')]]")
+            )).click()
+            time.sleep(1)
 
-        time.sleep(1)
-    driver.back()
-    time.sleep(1)
-
-# Cerrar conexiones
+# Close connections
 cursor.close()
 conn.close()
 driver.quit()
